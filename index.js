@@ -162,6 +162,14 @@ const TELEGRAM_ALLOWED_USER_IDS = getOptionalEnv("TELEGRAM_ALLOWED_USER_IDS", ""
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
+
+
+bot.onText(/^\/my_id$/i, async (msg) => {
+  const chatId = msg.chat.id;
+  if (!isAllowedUser(msg)) return;
+  const id = msg?.from?.id;
+  await bot.sendMessage(chatId, String(id || ""));
+});
 bot.onText(/^\/dev_bootstrap$/i, async (msg) => {
   const chatId = msg.chat.id;
   if (!isAllowedUser(msg)) return;
@@ -202,6 +210,30 @@ bot.onText(/^\/dev_request(?:\s+([\s\S]+))?$/i, async (msg, match) => {
     const currentIndex = readLocalFileSafe("index.js");
     const currentPkg = readLocalFileSafe("package.json");
 
+    if (/\/(my_id)\b/i.test(req)) {
+      const nextIndex = insertMyIdCommand(currentIndex);
+      devProposal = {
+        created_at: nowIso(),
+        reason: "Add /my_id command",
+        files: {
+          "index.js": nextIndex,
+          "package.json": currentPkg
+        }
+      };
+
+      await appendRowIfReady("Tasks", [
+        nowIso(),
+        "dev_proposal",
+        devProposal.reason,
+        JSON.stringify({ files: Object.keys(devProposal.files) }),
+        "pending",
+        "builtin_generator"
+      ]);
+
+      await bot.sendMessage(chatId, "Dev proposal prepared. Use /dev_diff then /dev_apply.");
+      return;
+    }
+
     const spec = await aiGenerateJson({
       task:
         "You are implementing changes in a Node.js Telegram bot project. " +
@@ -230,7 +262,7 @@ bot.onText(/^\/dev_request(?:\s+([\s\S]+))?$/i, async (msg, match) => {
       files: filtered
     };
 
-    await appendRow("Tasks", [
+    await appendRowIfReady("Tasks", [
       nowIso(),
       "dev_proposal",
       spec.reason || req,
@@ -282,7 +314,7 @@ bot.onText(/^\/dev_apply$/i, async (msg) => {
       writeLocalFileSafe(f, content);
     }
 
-    await appendRow("Tasks", [
+    await appendRowIfReady("Tasks", [
       nowIso(),
       "dev_apply",
       devProposal.reason || "apply",
@@ -451,6 +483,26 @@ let sheetsClient = null;
 
 const DEV_ALLOWLIST = new Set(["index.js", "package.json"]);
 let devProposal = null;
+
+async function appendRowIfReady(sheetTitle, values) {
+  try {
+    if (!sheetsClient) return;
+    await appendRow(sheetTitle, values);
+  } catch (e) {
+    console.error("appendRowIfReady error:", e && e.message ? e.message : String(e));
+  }
+}
+
+function insertMyIdCommand(indexJsSource) {
+  if (indexJsSource.includes("/^\\/my_id")) return indexJsSource;
+
+  const marker = "bot.onText(/^\\/dev_bootstrap$/i";
+  const snippet = `\n\nbot.onText(/^\\/my_id$/i, async (msg) => {\n  const chatId = msg.chat.id;\n  if (!isAllowedUser(msg)) return;\n  const id = msg?.from?.id;\n  await bot.sendMessage(chatId, String(id || \"\"));\n});\n`;
+
+  const idx = indexJsSource.indexOf(marker);
+  if (idx === -1) return indexJsSource + snippet;
+  return indexJsSource.slice(0, idx) + snippet + indexJsSource.slice(idx);
+}
 
 function nowIso() {
   return new Date().toISOString();
