@@ -164,11 +164,33 @@ const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 
 
-bot.onText(/^\/my_id$/i, async (msg) => {
+const lastPhotoByUserId = new Map();
+
+bot.on("photo", async (msg) => {
+  if (!isAllowedUser(msg)) return;
+  const chatId = msg.chat.id;
+  const userId = msg?.from?.id;
+  const photos = Array.isArray(msg.photo) ? msg.photo : [];
+  const best = photos.length ? photos[photos.length - 1] : null;
+  const fileId = best && best.file_id ? best.file_id : "";
+  if (!fileId) return;
+  lastPhotoByUserId.set(userId, { file_id: fileId, caption: msg.caption || "" });
+  try {
+    await appendRowIfReady("Creatives", [nowIso(), "asset", "photo", msg.caption || "", "telegram", "", "", fileId, "received", ""]);
+  } catch {}
+  await bot.sendPhoto(chatId, fileId, { caption: msg.caption || "" });
+});
+
+bot.onText(/^\/send_last_photo$/i, async (msg) => {
   const chatId = msg.chat.id;
   if (!isAllowedUser(msg)) return;
-  const id = msg?.from?.id;
-  await bot.sendMessage(chatId, String(id || ""));
+  const userId = msg?.from?.id;
+  const item = lastPhotoByUserId.get(userId);
+  if (!item || !item.file_id) {
+    await bot.sendMessage(chatId, "No photo saved yet. Send me a photo first.");
+    return;
+  }
+  await bot.sendPhoto(chatId, item.file_id, { caption: item.caption || "" });
 });
 bot.onText(/^\/dev_bootstrap$/i, async (msg) => {
   const chatId = msg.chat.id;
@@ -234,6 +256,30 @@ bot.onText(/^\/dev_request(?:\s+([\s\S]+))?$/i, async (msg, match) => {
       return;
     }
 
+    if (/картин|изображ|photo|image/i.test(req)) {
+      const nextIndex = insertPhotoSupport(currentIndex);
+      devProposal = {
+        created_at: nowIso(),
+        reason: "Add Telegram photo support",
+        files: {
+          "index.js": nextIndex,
+          "package.json": currentPkg
+        }
+      };
+
+      await appendRowIfReady("Tasks", [
+        nowIso(),
+        "dev_proposal",
+        devProposal.reason,
+        JSON.stringify({ files: Object.keys(devProposal.files) }),
+        "pending",
+        "builtin_generator"
+      ]);
+
+      await bot.sendMessage(chatId, "Dev proposal prepared. Use /dev_diff then /dev_apply.");
+      return;
+    }
+
     const spec = await aiGenerateJson({
       task:
         "You are implementing changes in a Node.js Telegram bot project. " +
@@ -275,7 +321,11 @@ bot.onText(/^\/dev_request(?:\s+([\s\S]+))?$/i, async (msg, match) => {
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     console.error("/dev_request error:", message);
-    await bot.sendMessage(chatId, "Ошибка: " + trimForTelegram(message));
+    const hint =
+      /429|quota|Too Many Requests/i.test(message)
+        ? "\nHint: AI quota exceeded. Wait and retry, or switch AI_PROVIDER to openai/anthropic with a paid key."
+        : "";
+    await bot.sendMessage(chatId, "Ошибка: " + trimForTelegram(message + hint));
   }
 });
 
@@ -498,6 +548,17 @@ function insertMyIdCommand(indexJsSource) {
 
   const marker = "bot.onText(/^\\/dev_bootstrap$/i";
   const snippet = `\n\nbot.onText(/^\\/my_id$/i, async (msg) => {\n  const chatId = msg.chat.id;\n  if (!isAllowedUser(msg)) return;\n  const id = msg?.from?.id;\n  await bot.sendMessage(chatId, String(id || \"\"));\n});\n`;
+
+  const idx = indexJsSource.indexOf(marker);
+  if (idx === -1) return indexJsSource + snippet;
+  return indexJsSource.slice(0, idx) + snippet + indexJsSource.slice(idx);
+}
+
+function insertPhotoSupport(indexJsSource) {
+  if (indexJsSource.includes("/^\\/send_last_photo")) return indexJsSource;
+
+  const marker = "bot.onText(/^\\/dev_bootstrap$/i";
+  const snippet = `\n\nconst lastPhotoByUserId = new Map();\n\nbot.on(\"photo\", async (msg) => {\n  if (!isAllowedUser(msg)) return;\n  const chatId = msg.chat.id;\n  const userId = msg?.from?.id;\n  const photos = Array.isArray(msg.photo) ? msg.photo : [];\n  const best = photos.length ? photos[photos.length - 1] : null;\n  const fileId = best && best.file_id ? best.file_id : \"\";\n  if (!fileId) return;\n  lastPhotoByUserId.set(userId, { file_id: fileId, caption: msg.caption || \"\" });\n  try {\n    await appendRowIfReady(\"Creatives\", [nowIso(), \"asset\", \"photo\", msg.caption || \"\", \"telegram\", \"\", \"\", fileId, \"received\", \"\"]);\n  } catch {}\n  await bot.sendPhoto(chatId, fileId, { caption: msg.caption || \"\" });\n});\n\nbot.onText(/^\\/send_last_photo$/i, async (msg) => {\n  const chatId = msg.chat.id;\n  if (!isAllowedUser(msg)) return;\n  const userId = msg?.from?.id;\n  const item = lastPhotoByUserId.get(userId);\n  if (!item || !item.file_id) {\n    await bot.sendMessage(chatId, \"No photo saved yet. Send me a photo first.\");\n    return;\n  }\n  await bot.sendPhoto(chatId, item.file_id, { caption: item.caption || \"\" });\n});\n`;
 
   const idx = indexJsSource.indexOf(marker);
   if (idx === -1) return indexJsSource + snippet;
